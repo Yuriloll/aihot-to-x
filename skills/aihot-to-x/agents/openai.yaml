@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI HOT to X"
+  short_description: "把 AI HOT 新闻整理成可发布的 X/QT 草稿"
+  default_prompt: "Use $aihot-to-x to turn the past 24 hours of AI HOT news into up to five Chinese X/QT drafts."
