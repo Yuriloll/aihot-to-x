@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 BASE_URL = "https://aihot.virxact.com"
-USER_AGENT = "aihot-skill/0.3.6 aihot-to-x/0.1.0 (+https://aihot.virxact.com/aihot-skill/)"
+USER_AGENT = "aihot-skill/0.3.6 aihot-to-x/1.0.0 (+https://aihot.virxact.com/aihot-skill/)"
 MAX_TAKE = 100
 
 
