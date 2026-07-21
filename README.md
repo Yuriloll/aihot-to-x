@@ -2,7 +2,7 @@
 
 基于 AI HOT 公开 API 的中文 X / Quote Tweet 草稿 Skill。它读取过去 24 小时的 AI 新闻，筛选最多 5 条重要事件，并输出经过结构与字符校验、可供人工审核的中文草稿。
 
-当前正式版本：`1.0.0`
+当前正式版本：`1.0.1`
 
 ## 项目定位与致谢
 
@@ -22,6 +22,7 @@
 - 按真实重要性筛选最多 5 条，质量不足时允许少于 5 条
 - 原链接是 X 状态链接时生成 QT；网站来源只有在严格匹配官方原推后才转换为 QT
 - 为每条新闻生成一个“钩子 + 关键事实 + 明确判断”的中文草稿
+- 内嵌作者自制的 `tweet-hook` Skill，负责每条草稿的开头钩子结构
 - 输出原始来源、AI HOT canonical、发布时间、入选理由和字符校验
 - 只生成草稿，不登录或发布 X
 
@@ -30,7 +31,7 @@
 1. `fetch_aihot.py` 从 AI HOT 匿名公开接口获取 24 小时候选。
 2. Agent 对同一事件做语义去重，并按新闻价值选择最多 5 条。
 3. Agent 核对来源链接；不能确认官方原推时保留原站。
-4. Agent 为每条新闻生成一个中文 X/QT 草稿。
+4. Agent 读取内嵌的 `tweet-hook` 规则，为每条新闻生成一个中文 X/QT 草稿。
 5. `validate_drafts.py` 检查字段、链接形态和 X 加权字符长度。
 6. 用户人工审核后自行决定是否发布。
 
@@ -51,6 +52,11 @@ npx skills add https://github.com/Yuriloll/aihot-to-x --skill aihot-to-x
 ```text
 aihot-to-x/
 ├── SKILL.md
+├── references/
+│   └── tweet-hook/
+│       ├── SKILL.md
+│       ├── hook-patterns.md
+│       └── article-hooks.md
 ├── agents/
 │   └── openai.yaml
 └── scripts/

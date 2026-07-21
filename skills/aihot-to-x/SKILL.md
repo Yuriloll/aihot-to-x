@@ -7,6 +7,12 @@ description: 从 AI HOT 公开只读 API 获取过去 24 小时 AI 新闻，筛�
 
 把 AI HOT 的当前数据整理成一篇新闻一条草稿。只生成草稿，绝不登录或操作 X 发布界面。
 
+## 内嵌的 tweet-hook Skill
+
+本 Skill 内嵌了作者自制的 `tweet-hook` Skill，文件位于 `references/tweet-hook/`。生成每条草稿前，先读取其中的 `SKILL.md`；写长文或教程时再读取 `article-hooks.md`，写单条 X 草稿时按 `hook-patterns.md` 选择一种钩子结构。
+
+每条草稿的开头必须先指出真实冲突、变化、代价或信息缺口，再落到已核验事实和明确判断。钩子只负责让读者继续读，不能制造不存在的数字、因果或影响。
+
 ## 项目定位与数据来源
 
 - 本项目是基于 AI HOT 公开 API 构建的第三方衍生 Skill，不是 AI HOT 官方 Skill 或官方仓库。
