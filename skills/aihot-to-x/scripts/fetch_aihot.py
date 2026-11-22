@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import re
 import sys
@@ -15,8 +16,8 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-BASE_URL = "https://aihot.virxact.com"
-USER_AGENT = "aihot-skill/0.3.6 aihot-to-x/1.0.1 (+https://aihot.virxact.com/aihot-skill/)"
+BASE_URL = "https://aihot.news"
+USER_AGENT = "aihot-to-x/1.0.1 (+https://aihot.news/aihot-skill/)"
 MAX_TAKE = 100
 
 
@@ -29,24 +30,34 @@ def iso_z(value: datetime) -> str:
 
 
 def request_json(url: str, timeout: float = 20.0) -> dict[str, Any]:
-    if not url.startswith(f"{BASE_URL}/api/public/"):
+    if not url.startswith(f"{BASE_URL}/api/v1/"):
         raise AihotError(f"refusing non-public endpoint: {url}")
 
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT}, method="GET")
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"}, method="GET")
     delay = 1.0
     for attempt in range(3):
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 if response.status != 200:
                     raise AihotError(f"unexpected HTTP status {response.status}")
-                payload = json.load(response)
+                body = response.read()
+                if response.headers.get("Content-Encoding") == "gzip":
+                    body = gzip.decompress(body)
+                payload = json.loads(body)
                 if not isinstance(payload, dict):
                     raise AihotError("AI HOT returned a non-object JSON response")
                 return payload
         except urllib.error.HTTPError as exc:
-            if exc.code == 429 and attempt < 2:
-                time.sleep(30)
+            if exc.code in {429, 503} and attempt < 2:
+                retry_after = exc.headers.get("Retry-After", "60")
+                try:
+                    wait = max(60, int(retry_after))
+                except ValueError:
+                    raise AihotError("AI HOT requested retry later; rerun after Retry-After") from exc
+                time.sleep(wait)
                 continue
+            if exc.code in {566, 567} and attempt >= 1:
+                raise AihotError(f"AI HOT HTTP {exc.code}; edge blocked") from exc
             if 500 <= exc.code < 600 and attempt < 2:
                 time.sleep(delay)
                 delay *= 2
@@ -90,34 +101,71 @@ def dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def publication_time(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo else None
+    except ValueError:
+        return None
+
+
+def normalize_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep the existing editor-facing shape; v1 provenance stays attached."""
+    links, source = item.get("links"), item.get("source")
+    if not isinstance(links, dict) or not isinstance(source, dict):
+        raise AihotError("AI HOT item is missing v1 links/source")
+    return {**item, "url": links.get("original"), "permalink": links.get("aihot"),
+            "title_en": item.get("originalTitle"), "source": source.get("name")}
+
+
 def fetch_mode(
     mode: str,
     since: str,
     fetcher: Callable[[str], dict[str, Any]] = request_json,
     max_pages: int = 10,
+    until: datetime | None = None,
+    window: str = "7d",
 ) -> list[dict[str, Any]]:
     if mode not in {"selected", "all"}:
         raise ValueError("mode must be selected or all")
 
+    start = publication_time(since)
+    if start is None or window not in {"24h", "7d"} or max_pages < 1:
+        raise ValueError("invalid time window or page limit")
+    end = until or datetime.now(timezone.utc)
+    seen_cursors: set[str] = set()
     items: list[dict[str, Any]] = []
     cursor: str | None = None
     for _ in range(max_pages):
-        params = {"mode": mode, "since": since, "take": str(MAX_TAKE)}
+        params = {"mode": mode, "window": window, "by": "published", "limit": str(MAX_TAKE)}
         if cursor:
             params["cursor"] = cursor
-        url = f"{BASE_URL}/api/public/items?{urllib.parse.urlencode(params)}"
+        url = f"{BASE_URL}/api/v1/items?{urllib.parse.urlencode(params)}"
         payload = fetcher(url)
         page_items = payload.get("items", [])
         if not isinstance(page_items, list):
             raise AihotError("AI HOT response field 'items' is not a list")
-        items.extend(item for item in page_items if isinstance(item, dict))
-        if not payload.get("hasNext"):
-            break
-        next_cursor = payload.get("nextCursor")
+        for item in page_items:
+            if not isinstance(item, dict):
+                raise AihotError("AI HOT item is not an object")
+            published = publication_time(item.get("publishedAt"))
+            if published is not None and start <= published <= end:
+                items.append(normalize_item(item))
+        page = payload.get("page")
+        if not isinstance(page, dict) or not isinstance(page.get("hasMore"), bool):
+            raise AihotError("AI HOT response is missing v1 pagination")
+        if not page["hasMore"]:
+            return dedupe(items)
+        next_cursor = page.get("nextCursor")
         if not isinstance(next_cursor, str) or not next_cursor:
             raise AihotError("AI HOT indicated another page without a cursor")
+        if next_cursor in seen_cursors:
+            raise AihotError("AI HOT repeated a pagination cursor")
+        seen_cursors.add(next_cursor)
         cursor = next_cursor
-    return dedupe(items)
+    raise AihotError("AI HOT page limit reached; refusing partial results")
 
 
 def collect_candidates(
@@ -129,21 +177,21 @@ def collect_candidates(
 ) -> dict[str, Any]:
     if hours < 1 or hours > 168:
         raise ValueError("hours must be between 1 and 168")
-    if target < 1 or target > 20:
-        raise ValueError("target must be between 1 and 20")
+    if target < 1 or target > 5:
+        raise ValueError("target must be between 1 and 5")
     if candidate_limit < target or candidate_limit > 200:
         raise ValueError("candidate_limit must be between target and 200")
 
     end = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     start = end - timedelta(hours=hours)
     since = iso_z(start)
-    selected = fetch_mode("selected", since, fetcher=fetcher)
+    selected = fetch_mode("selected", since, fetcher=fetcher, until=end, window="24h" if hours <= 24 else "7d")
 
     merged = list(selected)
     source_pool_count = len(selected)
     used_fallback = len(selected) < target
     if used_fallback:
-        all_items = fetch_mode("all", since, fetcher=fetcher)
+        all_items = fetch_mode("all", since, fetcher=fetcher, until=end, window="24h" if hours <= 24 else "7d")
         full_pool = dedupe(selected + all_items)
         source_pool_count = len(full_pool)
         selected_key_set = {key for item in selected for key in item_keys(item)}

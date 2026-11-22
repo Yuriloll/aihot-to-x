@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 URL_RE = re.compile(r"https?://[^\s<>]+")
 X_STATUS_RE = re.compile(r"^https://(?:www\.)?(?:x\.com|twitter\.com)/[^/]+/status/\d+(?:[/?#].*)?$")
-AIHOT_RE = re.compile(r"^https://aihot\.virxact\.com/(?:items|daily)/[^\s]+$")
+AIHOT_RE = re.compile(r"^https://aihot\.news/(?:items|daily)/[^\s]+$")
 
 
 def weighted_length(text: str) -> int:
