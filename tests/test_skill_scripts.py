@@ -6,6 +6,10 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+from unittest.mock import patch
+import gzip
+import io
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,14 +32,14 @@ def item(item_id, title, url, selected=True):
         "id": item_id,
         "title": title,
         "summary": "summary",
-        "source": "Official",
+        "source": {"name": "Official"},
+        "originalTitle": "Original title",
         "publishedAt": "2026-07-19T01:00:00.000Z",
         "category": "ai-models",
         "score": 90,
         "selected": selected,
-        "url": url,
-        "permalink": f"https://aihot.virxact.com/items/{item_id}",
-        "attribution": {"source": "AI HOT", "canonical": f"https://aihot.virxact.com/items/{item_id}"},
+        "links": {"original": url, "aihot": f"https://aihot.news/items/{item_id}"},
+        "attribution": {"name": "AI HOT", "url": f"https://aihot.news/items/{item_id}"},
     }
 
 
@@ -45,7 +49,7 @@ class FetchTests(unittest.TestCase):
 
         def fake(url):
             calls.append(url)
-            return {"items": [item(str(i), f"Title {i}", f"https://example.com/{i}") for i in range(6)], "hasNext": False}
+            return {"items": [item(str(i), f"Title {i}", f"https://example.com/{i}") for i in range(6)], "page": {"hasMore": False, "nextCursor": None}}
 
         result = fetch.collect_candidates(24, 5, 40, datetime(2026, 7, 19, 2, tzinfo=timezone.utc), fake)
         self.assertEqual(result["selectedCount"], 6)
@@ -55,13 +59,13 @@ class FetchTests(unittest.TestCase):
     def test_fallback_and_exact_deduplication(self):
         def fake(url):
             if "mode=selected" in url:
-                return {"items": [item("1", "Same", "https://example.com/1")], "hasNext": False}
+                return {"items": [item("1", "Same", "https://example.com/1")], "page": {"hasMore": False, "nextCursor": None}}
             return {
                 "items": [
                     item("1", "Same", "https://example.com/1"),
                     item("2", "Other", "https://example.com/2", False),
                 ],
-                "hasNext": False,
+                "page": {"hasMore": False, "nextCursor": None},
             }
 
         result = fetch.collect_candidates(24, 5, 40, datetime(2026, 7, 19, 2, tzinfo=timezone.utc), fake)
@@ -73,10 +77,10 @@ class FetchTests(unittest.TestCase):
     def test_fallback_pool_is_capped_but_selected_are_kept(self):
         def fake(url):
             if "mode=selected" in url:
-                return {"items": [item("s", "Selected", "https://example.com/s")], "hasNext": False}
+                return {"items": [item("s", "Selected", "https://example.com/s")], "page": {"hasMore": False, "nextCursor": None}}
             return {
                 "items": [item(str(i), f"Item {i}", f"https://example.com/{i}", False) | {"score": i} for i in range(20)],
-                "hasNext": False,
+                "page": {"hasMore": False, "nextCursor": None},
             }
 
         result = fetch.collect_candidates(24, 5, 6, datetime(2026, 7, 19, 2, tzinfo=timezone.utc), fake)
@@ -88,10 +92,10 @@ class FetchTests(unittest.TestCase):
     def test_pagination(self):
         def fake(url):
             if "cursor=" not in url:
-                return {"items": [item("1", "One", "https://example.com/1")], "hasNext": True, "nextCursor": "abc"}
-            return {"items": [item("2", "Two", "https://example.com/2")], "hasNext": False}
+                return {"items": [item("1", "One", "https://example.com/1")], "page": {"hasMore": True, "nextCursor": "abc"}}
+            return {"items": [item("2", "Two", "https://example.com/2")], "page": {"hasMore": False, "nextCursor": None}}
 
-        result = fetch.fetch_mode("selected", "2026-07-18T00:00:00Z", fake)
+        result = fetch.fetch_mode("selected", "2026-07-18T00:00:00Z", fake, until=datetime(2026, 7, 19, 2, tzinfo=timezone.utc))
         self.assertEqual([entry["id"] for entry in result], ["1", "2"])
 
     def test_non_public_endpoint_is_rejected(self):
@@ -110,10 +114,83 @@ class FetchTests(unittest.TestCase):
             1,
             5,
             datetime(2026, 7, 19, 2, tzinfo=timezone.utc),
-            lambda _url: {"items": [malicious], "hasNext": False},
+            lambda _url: {"items": [malicious], "page": {"hasMore": False, "nextCursor": None}},
         )
         self.assertIn("untrusted", result["notice"])
         self.assertEqual(result["items"][0]["summary"], malicious["summary"])
+
+
+    def test_v1_mapping_and_parameters(self):
+        calls = []
+        def fake(url):
+            calls.append(url)
+            return {"items": [item("one", "标题", "https://example.com/one")],
+                    "page": {"hasMore": False, "nextCursor": None}}
+        result = fetch.collect_candidates(48, 1, now=datetime(2026, 7, 19, 2, tzinfo=timezone.utc), fetcher=fake)
+        self.assertEqual(parse_qs(urlparse(calls[0]).query),
+                         {"mode": ["selected"], "window": ["7d"], "by": ["published"], "limit": ["100"]})
+        self.assertEqual(urlparse(calls[0]).path, "/api/v1/items")
+        entry = result["items"][0]
+        self.assertEqual(entry["source"], "Official")
+        self.assertEqual(entry["title_en"], "Original title")
+        self.assertEqual(entry["url"], "https://example.com/one")
+        self.assertEqual(entry["attribution"]["url"], entry["permalink"])
+
+    def test_strict_publication_window_in_both_pools(self):
+        times = ["2026-07-19T01:00:00Z", "2026-07-19T02:00:00Z",
+                 "2026-07-19T00:59:59Z", "2026-07-19T02:00:01Z", None,
+                 "invalid", "2026-07-19T01:30:00", "2026-07-19T09:30:00+08:00"]
+        calls = []
+        def fake(url):
+            calls.append(url)
+            return {"items": [item(str(i), str(i), f"https://example.com/{i}") | {"publishedAt": t}
+                              for i, t in enumerate(times)], "page": {"hasMore": False}}
+        result = fetch.collect_candidates(1, 5, now=datetime(2026, 7, 19, 2, tzinfo=timezone.utc), fetcher=fake)
+        self.assertEqual([i["id"] for i in result["items"]], ["0", "1", "7"])
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all("window=24h" in url for url in calls))
+
+    def test_pagination_errors_fail_closed(self):
+        for page in [{}, {"hasMore": True}, {"hasMore": "false"}]:
+            with self.subTest(page=page), self.assertRaises(fetch.AihotError):
+                fetch.fetch_mode("selected", "2026-07-18T00:00:00Z",
+                                 lambda _: {"items": [], "page": page})
+        for limit in [1, 3]:
+            with self.subTest(limit=limit), self.assertRaises(fetch.AihotError):
+                fetch.fetch_mode("selected", "2026-07-18T00:00:00Z",
+                                 lambda _: {"items": [], "page": {"hasMore": True, "nextCursor": "same"}}, max_pages=limit)
+
+    def test_target_never_exceeds_five(self):
+        with self.assertRaises(ValueError):
+            fetch.collect_candidates(24, 6, fetcher=lambda _: self.fail("must not fetch"))
+
+    def test_v1_fixture_and_draft_validation(self):
+        payload = json.loads((ROOT / "tests/fixtures/v1-items.json").read_text())
+        result = fetch.collect_candidates(24, 1, now=datetime(2026, 7, 19, 2, tzinfo=timezone.utc), fetcher=lambda _: payload)
+        entry = result["items"][0]
+        draft = {"type": "link", "text": "示例模型已更新。\n" + entry["url"],
+                 "sourceUrl": entry["url"], "aihotCanonical": entry["permalink"],
+                 "publishedAt": entry["publishedAt"], "selectionReason": "离线虚构测试"}
+        self.assertTrue(validate.validate_payload({"drafts": [draft]})["ok"])
+
+    def test_retry_after_and_edge_retry_cap(self):
+        for status, expected_calls in [(429, 3), (503, 3), (567, 2), (400, 1)]:
+            error = fetch.urllib.error.HTTPError("https://aihot.news/api/v1/items", status, "error", {"Retry-After": "120"}, None)
+            with self.subTest(status=status), patch.object(fetch.urllib.request, "urlopen", side_effect=error) as opened, patch.object(fetch.time, "sleep") as sleep:
+                with self.assertRaises(fetch.AihotError):
+                    fetch.request_json("https://aihot.news/api/v1/items")
+                self.assertEqual(opened.call_count, expected_calls)
+                if status in {429, 503}:
+                    self.assertEqual(sleep.call_args.args, (120,))
+
+    def test_gzip_response(self):
+        response = io.BytesIO(gzip.compress(b'{"items": [], "page": {"hasMore": false}}'))
+        response.status = 200
+        response.headers = {"Content-Encoding": "gzip"}
+        with patch.object(fetch.urllib.request, "urlopen", return_value=response) as opened:
+            result = fetch.request_json("https://aihot.news/api/v1/items")
+        self.assertEqual(result["items"], [])
+        self.assertEqual(opened.call_args.args[0].get_header("Accept-encoding"), "gzip")
 
 
 class ValidateTests(unittest.TestCase):
@@ -124,7 +201,7 @@ class ValidateTests(unittest.TestCase):
             "type": kind,
             "text": text,
             "sourceUrl": source,
-            "aihotCanonical": "https://aihot.virxact.com/items/abc",
+            "aihotCanonical": "https://aihot.news/items/abc",
             "publishedAt": "2026-07-19T01:00:00.000Z",
             "selectionReason": "重要模型更新",
         }
@@ -132,6 +209,12 @@ class ValidateTests(unittest.TestCase):
     def test_valid_qt_and_link(self):
         result = validate.validate_payload({"drafts": [self.base("qt"), self.base("link")]})
         self.assertTrue(result["ok"], json.dumps(result, ensure_ascii=False))
+
+    def test_old_or_spoofed_canonical_is_rejected(self):
+        for url in ["https://aihot.virxact.com/items/abc", "https://aihot.news.evil.test/items/abc"]:
+            draft = self.base()
+            draft["aihotCanonical"] = url
+            self.assertFalse(validate.validate_payload({"drafts": [draft]})["ok"])
 
     def test_qt_requires_status_url(self):
         draft = self.base("qt")

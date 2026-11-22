@@ -8,15 +8,15 @@
 
 本项目是基于 AI HOT 公开 API 构建的第三方衍生 Skill，不是 AI HOT 官方 Skill 或官方仓库。
 
-- AI HOT 网站：[https://aihot.virxact.com/](https://aihot.virxact.com/)
+- AI HOT 网站：[https://aihot.news/](https://aihot.news/)
 - AI HOT 作者：数字生命卡兹克（[@Khazix0918](https://x.com/Khazix0918)）
-- AI HOT 官方 Agent 接入：[https://aihot.virxact.com/agent](https://aihot.virxact.com/agent)
+- AI HOT 官方 Agent 接入：[https://aihot.news/agent](https://aihot.news/agent)
 
 感谢数字生命卡兹克免费开放 AI HOT 网站、RSS、Skill 和公开 API。本项目只负责把 AI HOT 候选数据继续加工成中文 X/QT 草稿；AI HOT 数据、页面与品牌归原项目所有。
 
 ## 能做什么
 
-- 匿名只读访问 `https://aihot.virxact.com/api/public/*`
+- 匿名只读访问 `https://aihot.news/api/v1/*`
 - 获取过去 24 小时 AI HOT 精选；精选不足时只从同一时间窗公开池补充
 - 对候选做基础去重，再由 Agent 完成语义去重和编辑价值判断
 - 按真实重要性筛选最多 5 条，质量不足时允许少于 5 条
@@ -70,7 +70,7 @@ aihot-to-x/
 
 - Python 3.9 或更高版本
 - 无第三方 Python 依赖
-- 能访问 `https://aihot.virxact.com/api/public/*`
+- 能访问 `https://aihot.news/api/v1/*`
 - 如需寻找官方原推，Agent 还需要网页或 X 搜索能力
 
 不需要 AI HOT API Key、X Token、cookie 或账号凭证。
@@ -146,3 +146,23 @@ python3 -m unittest discover -s tests -v
 ## 许可证
 
 本项目代码采用 [MIT License](LICENSE)。AI HOT 数据与第三方新闻原文遵循各自的来源、服务条款和版权要求。对外使用整理结果时应保留原始来源及 AI HOT canonical 供核验。
+
+
+## v1 接口迁移
+
+接口使用 `https://aihot.news/api/v1/items`，参数为 `mode`、`limit`、
+`window=24h|7d`、`by=published`，分页读取 `page.hasMore` / `page.nextCursor`。
+每次运行从首屏开始，不复用旧 cursor 或 ETag；本脚本是单次读取，不做后台轮询。
+如另行实现轮询，间隔不得短于 60 秒，并为同一完整 URL 保存响应及 ETag、使用 If-None-Match。
+
+脚本将 `links.original`、`links.aihot`、`originalTitle`、`source.name` 映射为
+原有候选字段 `url`、`permalink`、`title_en`、`source`，保留 v1 attribution。
+按带时区的 `publishedAt` 严格保留 windowStart 至 windowEnd 内的条目；缺失、
+无时区、格式错误或未来时间不入选，不能用 discoveredAt 补数。
+覆盖窗口可能较宽，但精选与补充池都执行同一截止时间检查。
+分页字段错误、循环 cursor 或超过页数上限时失败退出，不交付静默截断的结果。
+候选池不是草稿数量；最终仍最多 5 条有来源的中文草稿，仅供人工审核，不自动发布。
+
+迁移依据：[官方指南](https://aihot.news/agent?tab=api#legacy-api-migration)、
+[OpenAPI](https://aihot.news/openapi-v1.json)。匿名访问不等于任何用途都获许可；
+对外商业用途和批量再分发须按 [AIHOT 使用规则](https://aihot.news/terms) 核对授权。
